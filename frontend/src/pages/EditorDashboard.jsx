@@ -9,6 +9,7 @@ import { MapContainer, TileLayer, Marker, Popup, Circle, Polyline, useMap } from
 import 'leaflet/dist/leaflet.css';
 import { format } from 'date-fns';
 import useGeolocation from '../hooks/useGeolocation';
+import { Link } from 'react-router-dom';
 
 const MapUpdater = ({ center }) => {
   const map = useMap();
@@ -173,12 +174,12 @@ const EditorDashboard = () => {
               {item.label}
             </button>
           ))}
-          <a
-            href="/editor/reports"
+          <Link
+            to="/editor/reports"
             className="w-full flex items-center gap-3 px-4 py-3 rounded-md text-sm font-medium text-slate-600 hover:bg-slate-100 transition-colors"
           >
             <LayoutDashboard className="w-4 h-4" /> Reports
-          </a>
+          </Link>
         </nav>
 
         <div className="p-4 border-t mt-auto">
