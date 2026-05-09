@@ -11,7 +11,9 @@ export const useSocketStore = create((set, get) => ({
     const orgIdStr = typeof organizationId === 'object' && organizationId !== null ? organizationId._id : organizationId;
     
     if (!get().socket) {
-      const newSocket = io('http://localhost:5000');
+      const apiUrl = import.meta.env.VITE_API_URL || 'http://localhost:5000/api';
+      const socketUrl = apiUrl.replace(/\/api\/?$/, ''); // Remove /api to get base server URL
+      const newSocket = io(socketUrl);
       
       newSocket.on('connect', () => {
         newSocket.emit('join-org', orgIdStr);
