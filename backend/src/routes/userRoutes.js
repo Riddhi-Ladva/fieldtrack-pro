@@ -1,6 +1,6 @@
 const express = require('express');
 const router = express.Router();
-const { getUsers, createUser, updateUser } = require('../controllers/userController');
+const { getUsers, createUser, updateUser, deleteUser } = require('../controllers/userController');
 const { protect, authorizeRoles } = require('../middlewares/authMiddleware');
 
 router.route('/')
@@ -8,6 +8,7 @@ router.route('/')
   .post(protect, authorizeRoles('Admin', 'Editor'), createUser);
 
 router.route('/:id')
-  .put(protect, authorizeRoles('Admin', 'Editor'), updateUser);
+  .put(protect, authorizeRoles('Admin', 'Editor'), updateUser)
+  .delete(protect, authorizeRoles('Admin'), deleteUser);
 
 module.exports = router;

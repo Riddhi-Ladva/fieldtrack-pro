@@ -10,6 +10,8 @@ import {
 } from 'lucide-react';
 import { format } from 'date-fns';
 import { Link } from 'react-router-dom';
+import jsPDF from 'jspdf';
+import autoTable from 'jspdf-autotable';
 
 const ROWS_PER_PAGE = 10;
 
@@ -33,6 +35,7 @@ const Reports = () => {
   const [page, setPage] = useState(1);
   const [loading, setLoading] = useState(false);
   const [exporting, setExporting] = useState(false);
+  const [editingSession, setEditingSession] = useState(null);
 
   const dashboardLink = user?.role === 'Admin' ? '/admin/dashboard' : '/editor/dashboard';
 
@@ -115,6 +118,97 @@ const Reports = () => {
     setExporting(false);
   };
 
+  const handleUpdateAttendance = async (e) => {
+    e.preventDefault();
+    const formData = new FormData(e.target);
+    try {
+      await api.put(`/attendance/${editingSession._id}`, Object.fromEntries(formData));
+      setEditingSession(null);
+      fetchSummary();
+      fetchSessions();
+    } catch (err) {
+      alert(err.response?.data?.message || 'Failed to update attendance record.');
+    }
+  };
+
+  const handleExportPDF = () => {
+    const doc = new jsPDF();
+    
+    // Company header
+    doc.setFontSize(20);
+    doc.text('FieldTrack Pro - Attendance Report', 20, 20);
+    
+    doc.setFontSize(12);
+    doc.text(`Generated on: ${format(new Date(), 'PPP')}`, 20, 35);
+    
+    if (startDate && endDate) {
+      doc.text(`Period: ${format(new Date(startDate), 'PP')} - ${format(new Date(endDate), 'PP')}`, 20, 45);
+    } else {
+      doc.text(`Period: ${range.charAt(0).toUpperCase() + range.slice(1)}`, 20, 45);
+    }
+    
+    // Summary stats
+    if (overview) {
+      doc.setFontSize(14);
+      doc.text('Summary Statistics', 20, 65);
+      
+      const stats = [
+        ['Total Team', overview.totalEmployees],
+        ['Present Today', overview.presentToday],
+        ['Absent Today', overview.absentToday],
+        ['Active Now', overview.activeSessions],
+        ['Total Punch-Ins', overview.totalPunchIns],
+        ['Total Punch-Outs', overview.totalPunchOuts]
+      ];
+      
+      autoTable(doc, {
+        startY: 75,
+        head: [['Metric', 'Value']],
+        body: stats,
+        theme: 'grid',
+        styles: { fontSize: 10 },
+        headStyles: { fillColor: [41, 128, 185] }
+      });
+    }
+    
+    // Attendance table
+    const tableData = filtered.map(session => [
+      session.userId?.name || 'Unknown',
+      format(new Date(session.punchInTime), 'PPpp'),
+      session.punchOutTime ? format(new Date(session.punchOutTime), 'PPpp') : 'Active',
+      session.duration ? `${Math.floor(session.duration / 60)}h ${session.duration % 60}m` : '-',
+      session.mode,
+      session.status
+    ]);
+    
+    autoTable(doc, {
+      startY: overview && doc.lastAutoTable ? doc.lastAutoTable.finalY + 20 : 65,
+      head: [['Employee', 'Punch In', 'Punch Out', 'Duration', 'Mode', 'Status']],
+      body: tableData,
+      theme: 'striped',
+      styles: { fontSize: 8 },
+      headStyles: { fillColor: [52, 152, 219] },
+      columnStyles: {
+        0: { cellWidth: 30 },
+        1: { cellWidth: 35 },
+        2: { cellWidth: 35 },
+        3: { cellWidth: 20 },
+        4: { cellWidth: 20 },
+        5: { cellWidth: 20 }
+      }
+    });
+    
+    // Footer
+    const pageCount = doc.internal.getNumberOfPages();
+    for (let i = 1; i <= pageCount; i++) {
+      doc.setPage(i);
+      doc.setFontSize(8);
+      doc.text(`Page ${i} of ${pageCount}`, doc.internal.pageSize.width - 30, doc.internal.pageSize.height - 10);
+    }
+    
+    doc.save(`attendance_report_${new Date().toISOString().split('T')[0]}.pdf`);
+  };
+
   const summaryCards = overview ? [
     { label: 'Total Team', value: overview.totalEmployees, icon: Users, color: 'text-blue-600', bg: 'bg-blue-50', border: 'border-blue-100' },
     { label: 'Present Today', value: overview.presentToday, icon: CheckCircle, color: 'text-green-600', bg: 'bg-green-50', border: 'border-green-100' },
@@ -167,14 +261,24 @@ const Reports = () => {
       <div className="flex-1 flex flex-col overflow-hidden">
         <header className="h-16 bg-white border-b flex items-center justify-between px-8 shadow-sm z-10">
           <h1 className="text-xl font-semibold">Attendance Reports</h1>
-          <Button
-            onClick={handleExportCSV}
-            disabled={exporting}
-            className="flex items-center gap-2"
-          >
-            <Download className="w-4 h-4" />
-            {exporting ? 'Exporting...' : 'Export CSV'}
-          </Button>
+          <div className="flex gap-3">
+            <Button
+              variant="outline"
+              onClick={handleExportPDF}
+              className="flex items-center gap-2"
+            >
+              <FileText className="w-4 h-4" />
+              Export PDF
+            </Button>
+            <Button
+              onClick={handleExportCSV}
+              disabled={exporting}
+              className="flex items-center gap-2"
+            >
+              <Download className="w-4 h-4" />
+              {exporting ? 'Exporting...' : 'Export CSV'}
+            </Button>
+          </div>
         </header>
 
         <main className="flex-1 overflow-auto p-8 space-y-8">
@@ -279,6 +383,35 @@ const Reports = () => {
             </Card>
           )}
 
+          {editingSession && (
+            <Card className="border-primary/20 bg-primary/5 shadow-sm">
+              <CardHeader><CardTitle className="text-primary text-base">Edit Attendance Record</CardTitle></CardHeader>
+              <CardContent>
+                <form onSubmit={handleUpdateAttendance} className="grid grid-cols-1 lg:grid-cols-4 gap-4 items-end">
+                  <div className="space-y-1">
+                    <label className="text-sm">Punch In Time</label>
+                    <Input name="punchInTime" type="datetime-local" defaultValue={new Date(editingSession.punchInTime).toISOString().slice(0, 16)} required />
+                  </div>
+                  <div className="space-y-1">
+                    <label className="text-sm">Punch Out Time</label>
+                    <Input name="punchOutTime" type="datetime-local" defaultValue={editingSession.punchOutTime ? new Date(editingSession.punchOutTime).toISOString().slice(0, 16) : ''} />
+                  </div>
+                  <div className="space-y-1">
+                    <label className="text-sm">Mode</label>
+                    <select name="mode" defaultValue={editingSession.mode} className="w-full border rounded-md h-10 px-3 text-sm">
+                      <option value="Remote">Remote</option>
+                      <option value="Geo-Fenced">Geo-Fenced</option>
+                    </select>
+                  </div>
+                  <div className="flex gap-2">
+                    <Button type="submit" className="flex-1">Save</Button>
+                    <Button type="button" variant="outline" onClick={() => setEditingSession(null)}>Cancel</Button>
+                  </div>
+                </form>
+              </CardContent>
+            </Card>
+          )}
+
           {/* Attendance Table */}
           <Card className="shadow-sm">
             <CardHeader className="flex flex-row items-center justify-between pb-4">
@@ -314,6 +447,7 @@ const Reports = () => {
                         <th className="p-4 font-medium text-muted-foreground">Punch Out</th>
                         <th className="p-4 font-medium text-muted-foreground">Duration</th>
                         <th className="p-4 font-medium text-muted-foreground">Status</th>
+                        <th className="p-4 font-medium text-muted-foreground">Action</th>
                       </tr>
                     </thead>
                     <tbody>
@@ -344,6 +478,9 @@ const Reports = () => {
                             <span className={`text-xs font-medium px-2 py-1 rounded-full ${statusColor(s.status)}`}>
                               {s.status}
                             </span>
+                          </td>
+                          <td className="p-4">
+                            <Button variant="ghost" size="sm" onClick={() => setEditingSession(s)} className="text-primary hover:bg-primary/10">Edit</Button>
                           </td>
                         </tr>
                       ))}

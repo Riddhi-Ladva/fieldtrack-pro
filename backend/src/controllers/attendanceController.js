@@ -2,6 +2,7 @@ const AttendanceSession = require('../models/AttendanceSession');
 const LocationLog = require('../models/LocationLog');
 const GeoFence = require('../models/GeoFence');
 const AuditLog = require('../models/AuditLog');
+const BreachLog = require('../models/BreachLog');
 const haversineDistance = require('../utils/haversine');
 
 // @desc    Punch in
@@ -186,6 +187,46 @@ const logLocation = async (req, res) => {
       location,
     });
 
+    // Check for geo-fence breach if user has assigned geo-fence
+    if (req.user.assignedGeoFenceId) {
+      const assignedFence = await GeoFence.findById(req.user.assignedGeoFenceId);
+      if (assignedFence) {
+        const dist = haversineDistance(location, assignedFence.location);
+        if (dist > assignedFence.radius) {
+          // Check if breach already logged recently (within last 5 minutes) to avoid spam
+          const recentBreach = await BreachLog.findOne({
+            sessionId: session._id,
+            timestamp: { $gte: new Date(Date.now() - 5 * 60 * 1000) }
+          });
+
+          if (!recentBreach) {
+            // Log breach
+            await BreachLog.create({
+              sessionId: session._id,
+              userId: req.user._id,
+              organizationId: req.user.organizationId,
+              geoFenceId: assignedFence._id,
+              location,
+              distance: dist
+            });
+
+            // Emit breach alert to organization
+            if (req.io) {
+              req.io.to(req.user.organizationId.toString()).emit('geo-fence-breach', {
+                userId: req.user._id,
+                userName: req.user.name,
+                sessionId: session._id,
+                location,
+                distance: dist,
+                timestamp: new Date(),
+                geoFenceName: assignedFence.name
+              });
+            }
+          }
+        }
+      }
+    }
+
     res.status(201).json({ message: 'Location logged' });
   } catch (error) {
     res.status(500).json({ message: error.message });
@@ -251,4 +292,72 @@ const updateAttendanceRecord = async (req, res) => {
   }
 };
 
-module.exports = { punchIn, punchOut, getActiveSession, logLocation, getOrgActiveSessions, updateAttendanceRecord };
+// @desc    Get member's attendance history
+// @route   GET /api/attendance/history?page=1&limit=10
+// @access  Private
+const getAttendanceHistory = async (req, res) => {
+  try {
+    const page = parseInt(req.query.page) || 1;
+    const limit = parseInt(req.query.limit) || 10;
+    const skip = (page - 1) * limit;
+
+    // Get completed sessions for the logged-in user
+    const sessions = await AttendanceSession.find({
+      userId: req.user._id,
+      status: 'Completed'
+    })
+    .sort({ punchInTime: -1 })
+    .skip(skip)
+    .limit(limit)
+    .lean();
+
+    // Get total count for pagination
+    const total = await AttendanceSession.countDocuments({
+      userId: req.user._id,
+      status: 'Completed'
+    });
+
+    res.json({
+      data: sessions,
+      pagination: {
+        currentPage: page,
+        totalPages: Math.ceil(total / limit),
+        totalRecords: total,
+        limit
+      }
+    });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+
+// @desc    Get location history for a user (for route breadcrumb)
+// @route   GET /api/attendance/location-history/:userId
+// @access  Private (Admin/Editor)
+const getLocationHistory = async (req, res) => {
+  try {
+    const { userId } = req.params;
+    const { date } = req.query; // Optional date filter, format YYYY-MM-DD
+
+    let filter = { userId };
+
+    if (date) {
+      const startOfDay = new Date(date);
+      startOfDay.setHours(0, 0, 0, 0);
+      const endOfDay = new Date(date);
+      endOfDay.setHours(23, 59, 59, 999);
+      filter.timestamp = { $gte: startOfDay, $lte: endOfDay };
+    }
+
+    const locations = await LocationLog.find(filter)
+      .sort({ timestamp: 1 })
+      .select('location timestamp')
+      .lean();
+
+    res.json(locations);
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+
+module.exports = { punchIn, punchOut, getActiveSession, logLocation, getOrgActiveSessions, updateAttendanceRecord, getAttendanceHistory, getLocationHistory };

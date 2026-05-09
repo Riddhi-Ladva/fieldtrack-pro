@@ -4,11 +4,20 @@ import { useSocketStore } from '../store/socketStore';
 import { Button } from '../components/ui/button';
 import { Input } from '../components/ui/input';
 import { Card, CardHeader, CardTitle, CardContent } from '../components/ui/card';
-import { Users, Map as MapIcon, ShieldAlert, LogOut, LayoutDashboard, Plus, Trash2, Clock, CheckCircle, XCircle, PlayCircle, LogIn, LogOut as LogOutIcon } from 'lucide-react';
+import { Users, Map as MapIcon, ShieldAlert, LogOut, LayoutDashboard, Plus, Trash2 } from 'lucide-react';
 import { Link } from 'react-router-dom';
-import { MapContainer, TileLayer, Marker, Popup, Circle } from 'react-leaflet';
+import { MapContainer, TileLayer, Marker, Popup, Circle, Polyline, useMap } from 'react-leaflet';
 import 'leaflet/dist/leaflet.css';
 import { format } from 'date-fns';
+import useGeolocation from '../hooks/useGeolocation';
+
+const MapUpdater = ({ center }) => {
+  const map = useMap();
+  useEffect(() => {
+    if (center) map.setView(center, map.getZoom());
+  }, [center, map]);
+  return null;
+};
 
 const AdminDashboard = () => {
   const user = useAuthStore((state) => state.user);
@@ -16,6 +25,7 @@ const AdminDashboard = () => {
   const connectSocket = useSocketStore((state) => state.connect);
   const disconnectSocket = useSocketStore((state) => state.disconnect);
   const liveLocations = useSocketStore((state) => state.liveLocations);
+  const breachAlerts = useSocketStore((state) => state.breachAlerts);
 
   const [activeTab, setActiveTab] = useState('map');
   const [team, setTeam] = useState([]);
@@ -26,16 +36,10 @@ const AdminDashboard = () => {
   const [editingFence, setEditingFence] = useState(null);
   const [org, setOrg] = useState(null);
   const [summary, setSummary] = useState(null);
-
-  useEffect(() => {
-    connectSocket(user.organizationId);
-    fetchData();
-    window._refetchAdminData = fetchData;
-    return () => {
-      disconnectSocket();
-      delete window._refetchAdminData;
-    };
-  }, []);
+  const [userToDelete, setUserToDelete] = useState(null);
+  const [deleting, setDeleting] = useState(false);
+  const [selectedUserForRoute, setSelectedUserForRoute] = useState(null);
+  const [routeLocations, setRouteLocations] = useState([]);
 
   const fetchData = async () => {
     try {
@@ -57,6 +61,22 @@ const AdminDashboard = () => {
       console.error('Fetch error:', err);
     }
   };
+
+  useEffect(() => {
+    connectSocket(user.organizationId);
+    fetchData();
+    window._refetchAdminData = fetchData;
+    
+    // Request notification permission for breach alerts
+    if (Notification.permission === 'default') {
+      Notification.requestPermission();
+    }
+    
+    return () => {
+      disconnectSocket();
+      delete window._refetchAdminData;
+    };
+  }, []);
 
   const handleUpdateUser = async (e) => {
     e.preventDefault();
@@ -141,10 +161,44 @@ const AdminDashboard = () => {
     }
   };
 
+  const handleDeleteUser = async () => {
+    if (!userToDelete) return;
+    setDeleting(true);
+    try {
+      await api.delete(`/users/${userToDelete._id}`);
+      setUserToDelete(null);
+      fetchData();
+      alert('User deleted successfully');
+    } catch (err) {
+      alert(err.response?.data?.message || 'Error deleting user');
+    } finally {
+      setDeleting(false);
+    }
+  };
+
+  const handleShowRoute = async (userId) => {
+    try {
+      const today = new Date().toISOString().split('T')[0]; // YYYY-MM-DD
+      const res = await api.get(`/attendance/location-history/${userId}?date=${today}`);
+      setRouteLocations(res.data);
+      setSelectedUserForRoute(userId);
+    } catch (err) {
+      console.error('Error fetching route:', err);
+      alert('Error loading route data');
+    }
+  };
+
+  const handleClearRoute = () => {
+    setRouteLocations([]);
+    setSelectedUserForRoute(null);
+  };
+
+  const { location } = useGeolocation();
+
   // Setup bounds for map
   const defaultCenter = geofences.length > 0 
     ? [geofences[0].location.lat, geofences[0].location.lng]
-    : [37.7749, -122.4194];
+    : (location ? [location.lat, location.lng] : [20.5937, 78.9629]); // Fallback to India
 
   return (
     <div className="flex h-screen bg-slate-50 overflow-hidden">
@@ -212,6 +266,7 @@ const AdminDashboard = () => {
           {activeTab === 'map' && (
             <div className="h-full relative">
               <MapContainer center={defaultCenter} zoom={13} className="w-full h-full z-0">
+                <MapUpdater center={defaultCenter} />
                 <TileLayer url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png" />
                 
                 {/* Render Geofences */}
@@ -239,11 +294,25 @@ const AdminDashboard = () => {
                         <strong>{session.userId.name}</strong><br/>
                         Role: {session.userId.role}<br/>
                         Mode: {session.mode}<br/>
-                        Last Update: {format(new Date(updated), 'HH:mm:ss')}
+                        Last Update: {format(new Date(updated), 'HH:mm:ss')}<br/>
+                        <button 
+                          className="text-blue-600 underline mt-1"
+                          onClick={() => handleShowRoute(session.userId._id)}
+                        >
+                          Show Route
+                        </button>
                       </Popup>
                     </Marker>
                   )
                 })}
+
+                {/* Render Route Breadcrumb */}
+                {routeLocations.length > 1 && (
+                  <Polyline 
+                    positions={routeLocations.map(loc => [loc.location.lat, loc.location.lng])}
+                    pathOptions={{ color: 'red', weight: 3, opacity: 0.7 }}
+                  />
+                )}
               </MapContainer>
               
               {/* Stats Overlay */}
@@ -256,7 +325,47 @@ const AdminDashboard = () => {
                     <div className="text-3xl font-bold text-primary">{activeSessions.length}</div>
                   </CardContent>
                 </Card>
+                {selectedUserForRoute && (
+                  <Card className="shadow-lg min-w-[200px]">
+                    <CardHeader className="py-3 px-4">
+                      <CardTitle className="text-sm text-muted-foreground">Route Display</CardTitle>
+                    </CardHeader>
+                    <CardContent className="py-2 px-4">
+                      <div className="text-sm mb-2">Showing route for selected user</div>
+                      <Button size="sm" variant="outline" onClick={handleClearRoute}>
+                        Clear Route
+                      </Button>
+                    </CardContent>
+                  </Card>
+                )}
               </div>
+
+              {/* Breach Alerts */}
+              {breachAlerts.length > 0 && (
+                <div className="absolute bottom-6 right-6 z-[1000] max-w-sm">
+                  <Card className="shadow-lg border-red-200 bg-red-50">
+                    <CardHeader className="py-3 px-4">
+                      <CardTitle className="text-sm text-red-700 flex items-center gap-2">
+                        <ShieldAlert className="w-4 h-4" />
+                        Geo-Fence Breach Alerts
+                      </CardTitle>
+                    </CardHeader>
+                    <CardContent className="py-2 px-4 max-h-48 overflow-y-auto">
+                      {breachAlerts.map((alert, index) => (
+                        <div key={index} className="mb-3 last:mb-0 p-2 bg-white rounded border border-red-100">
+                          <div className="text-sm font-medium text-red-800">{alert.userName}</div>
+                          <div className="text-xs text-red-600">
+                            Exited {alert.geoFenceName} • {Math.round(alert.distance)}m away
+                          </div>
+                          <div className="text-xs text-gray-500">
+                            {format(new Date(alert.timestamp), 'HH:mm:ss')}
+                          </div>
+                        </div>
+                      ))}
+                    </CardContent>
+                  </Card>
+                </div>
+              )}
             </div>
           )}
 
@@ -360,7 +469,10 @@ const AdminDashboard = () => {
                           <td className="p-3 text-muted-foreground text-sm">{u.assignedGeoFenceId?.name || 'None'}</td>
                           <td className="p-3 text-sm">{format(new Date(u.createdAt), 'MMM d, yyyy')}</td>
                           <td className="p-3">
-                            <Button variant="ghost" size="sm" onClick={() => setEditingUser(u)} className="text-primary hover:bg-primary/10">Edit</Button>
+                            <div className="flex gap-2">
+                              <Button variant="ghost" size="sm" onClick={() => setEditingUser(u)} className="text-primary hover:bg-primary/10">Edit</Button>
+                              <Button variant="ghost" size="sm" onClick={() => setUserToDelete(u)} className="text-destructive hover:bg-destructive/10">Delete</Button>
+                            </div>
                           </td>
                         </tr>
                       ))}
@@ -378,8 +490,8 @@ const AdminDashboard = () => {
                 <CardContent>
                   <form onSubmit={handleCreateFence} className="grid grid-cols-5 gap-4 items-end">
                     <div className="col-span-2 space-y-1"><label className="text-sm">Zone Name</label><Input name="name" placeholder="e.g. HQ Building" required /></div>
-                    <div className="space-y-1"><label className="text-sm">Lat</label><Input name="lat" type="number" step="any" placeholder="37.7749" required /></div>
-                    <div className="space-y-1"><label className="text-sm">Lng</label><Input name="lng" type="number" step="any" placeholder="-122.4194" required /></div>
+                    <div className="space-y-1"><label className="text-sm">Latitude</label><Input name="lat" type="number" step="any" placeholder="20.5937" required /></div>
+                    <div className="space-y-1"><label className="text-sm">Longitude</label><Input name="lng" type="number" step="any" placeholder="78.9629" required /></div>
                     <div className="space-y-1"><label className="text-sm">Radius (m)</label><Input name="radius" type="number" defaultValue="500" required /></div>
                     <Button type="submit" className="col-span-5"><Plus className="w-4 h-4 mr-2" /> Create Zone</Button>
                   </form>
@@ -474,6 +586,43 @@ const AdminDashboard = () => {
                     </div>
                     <Button type="submit" className="w-full">Save Settings</Button>
                   </form>
+                </CardContent>
+              </Card>
+            </div>
+          )}
+
+          {/* Delete User Confirmation Modal */}
+          {userToDelete && (
+            <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
+              <Card className="max-w-md">
+                <CardHeader>
+                  <CardTitle className="text-destructive">Confirm User Deletion</CardTitle>
+                </CardHeader>
+                <CardContent className="space-y-4">
+                  <p className="text-sm text-muted-foreground">
+                    Are you sure you want to delete <strong>{userToDelete.name}</strong> ({userToDelete.email})?
+                  </p>
+                  <p className="text-xs text-destructive bg-destructive/10 p-3 rounded">
+                    ⚠️ This action cannot be undone. All active sessions will be cancelled.
+                  </p>
+                  <div className="flex gap-3">
+                    <Button 
+                      variant="outline" 
+                      className="flex-1" 
+                      onClick={() => setUserToDelete(null)}
+                      disabled={deleting}
+                    >
+                      Cancel
+                    </Button>
+                    <Button 
+                      variant="destructive" 
+                      className="flex-1" 
+                      onClick={handleDeleteUser}
+                      disabled={deleting}
+                    >
+                      {deleting ? 'Deleting...' : 'Delete User'}
+                    </Button>
+                  </div>
                 </CardContent>
               </Card>
             </div>

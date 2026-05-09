@@ -5,9 +5,18 @@ import { Button } from '../components/ui/button';
 import { Input } from '../components/ui/input';
 import { Card, CardHeader, CardTitle, CardContent } from '../components/ui/card';
 import { Users, Map as MapIcon, ShieldAlert, LogOut, LayoutDashboard, Plus, Download, History, Edit3 } from 'lucide-react';
-import { MapContainer, TileLayer, Marker, Popup, Circle } from 'react-leaflet';
+import { MapContainer, TileLayer, Marker, Popup, Circle, Polyline, useMap } from 'react-leaflet';
 import 'leaflet/dist/leaflet.css';
 import { format } from 'date-fns';
+import useGeolocation from '../hooks/useGeolocation';
+
+const MapUpdater = ({ center }) => {
+  const map = useMap();
+  useEffect(() => {
+    if (center) map.setView(center, map.getZoom());
+  }, [center, map]);
+  return null;
+};
 
 const EditorDashboard = () => {
   const user = useAuthStore((state) => state.user);
@@ -23,6 +32,10 @@ const EditorDashboard = () => {
   const [activeSessions, setActiveSessions] = useState([]);
   const [editingUser, setEditingUser] = useState(null);
   const [reportData, setReportData] = useState([]);
+  const [sessions, setSessions] = useState([]);
+  const [editingSession, setEditingSession] = useState(null);
+  const [routeLocations, setRouteLocations] = useState([]);
+  const [selectedUserForRoute, setSelectedUserForRoute] = useState(null);
 
   useEffect(() => {
     connectSocket(user.organizationId);
@@ -36,18 +49,20 @@ const EditorDashboard = () => {
 
   const fetchData = async () => {
     try {
-      const [usersRes, fencesRes, logsRes, sessionsRes, reportRes] = await Promise.all([
+      const [usersRes, fencesRes, logsRes, sessionsRes, reportRes, recordsRes] = await Promise.all([
         api.get('/users'),
         api.get('/geofences'),
         api.get('/audit'),
         api.get('/attendance/org-active'),
-        api.get('/reports/summary?range=weekly')
+        api.get('/reports/summary?range=weekly'),
+        api.get('/reports/records')
       ]);
       setTeam(usersRes.data);
       setGeofences(fencesRes.data);
       setLogs(logsRes.data);
       setActiveSessions(sessionsRes.data);
       setReportData(reportRes.data?.trend || []);
+      setSessions(recordsRes.data);
     } catch (err) {
       console.error('Fetch error:', err);
     }
@@ -67,6 +82,47 @@ const EditorDashboard = () => {
     }
   };
 
+  const handleCreateUser = async (e) => {
+    e.preventDefault();
+    const formData = new FormData(e.target);
+    try {
+      await api.post('/users', Object.fromEntries(formData));
+      e.target.reset();
+      fetchData();
+    } catch (err) {
+      alert(err.response?.data?.message || 'Error creating member.');
+    }
+  };
+
+  const handleUpdateAttendance = async (e) => {
+    e.preventDefault();
+    const formData = new FormData(e.target);
+    try {
+      await api.put(`/attendance/${editingSession._id}`, Object.fromEntries(formData));
+      setEditingSession(null);
+      fetchData();
+    } catch (err) {
+      alert(err.response?.data?.message || 'Failed to update attendance record.');
+    }
+  };
+
+  const handleShowRoute = async (userId) => {
+    try {
+      const today = new Date().toISOString().split('T')[0]; // YYYY-MM-DD
+      const res = await api.get(`/attendance/location-history/${userId}?date=${today}`);
+      setRouteLocations(res.data);
+      setSelectedUserForRoute(userId);
+    } catch (err) {
+      console.error('Error fetching route:', err);
+      alert('Error loading route data');
+    }
+  };
+
+  const handleClearRoute = () => {
+    setRouteLocations([]);
+    setSelectedUserForRoute(null);
+  };
+
   const handleExportCSV = async () => {
     try {
       const response = await api.get('/reports/export', { responseType: 'blob' });
@@ -82,9 +138,12 @@ const EditorDashboard = () => {
     }
   };
 
+  const { location } = useGeolocation();
+
+  // Setup bounds for map
   const defaultCenter = geofences.length > 0 
     ? [geofences[0].location.lat, geofences[0].location.lng]
-    : [37.7749, -122.4194];
+    : (location ? [location.lat, location.lng] : [20.5937, 78.9629]); // Fallback to India
 
   return (
     <div className="flex h-screen bg-slate-50 overflow-hidden">
@@ -142,19 +201,57 @@ const EditorDashboard = () => {
           {activeTab === 'map' && (
             <div className="h-full relative">
               <MapContainer center={defaultCenter} zoom={13} className="w-full h-full z-0">
+                <MapUpdater center={defaultCenter} />
                 <TileLayer url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png" />
                 {geofences.map(fence => (
                   <Circle key={fence._id} center={[fence.location.lat, fence.location.lng]} radius={fence.radius} pathOptions={{ color: 'blue', fillOpacity: 0.1 }} />
                 ))}
                 {activeSessions.map(session => {
-                  const loc = liveLocations[session.userId._id]?.location || session.punchInLocation;
+                  const liveLoc = liveLocations[session.userId._id]?.location;
+                  const loc = liveLoc || session.punchInLocation;
+                  const updated = liveLocations[session.userId._id]?.timestamp || session.updatedAt;
+
                   return (
                     <Marker key={session._id} position={[loc.lat, loc.lng]}>
-                      <Popup><strong>{session.userId.name}</strong><br/>Status: Active<br/>Mode: {session.mode}</Popup>
+                      <Popup>
+                        <div className="text-sm">
+                          <strong>{session.userId.name}</strong><br/>
+                          Status: Active<br/>
+                          Mode: {session.mode}<br/>
+                          Last Update: {format(new Date(updated), 'HH:mm:ss')}<br/>
+                          {session.mode === 'Remote' && (
+                            <button 
+                              className="text-blue-600 underline mt-1 block"
+                              onClick={() => handleShowRoute(session.userId._id)}
+                            >
+                              Show Route
+                            </button>
+                          )}
+                        </div>
+                      </Popup>
                     </Marker>
                   );
                 })}
+                
+                {/* Render Route Breadcrumb */}
+                {routeLocations.length > 1 && (
+                  <Polyline 
+                    positions={routeLocations.map(loc => [loc.location.lat, loc.location.lng])} 
+                    color="blue" 
+                    weight={4}
+                    opacity={0.7}
+                  />
+                )}
               </MapContainer>
+
+              {/* Clear Route Button */}
+              {routeLocations.length > 0 && (
+                <div className="absolute bottom-6 left-1/2 transform -translate-x-1/2 z-[1000]">
+                  <Button variant="default" className="shadow-lg" onClick={handleClearRoute}>
+                    Clear Route
+                  </Button>
+                </div>
+              )}
               <div className="absolute top-6 right-6 z-[1000]">
                 <Card className="shadow-lg p-4 bg-white/90 backdrop-blur">
                   <div className="text-xs text-muted-foreground uppercase font-bold tracking-wider">Live Sessions</div>
@@ -166,6 +263,27 @@ const EditorDashboard = () => {
 
           {activeTab === 'team' && (
             <div className="p-8 max-w-5xl mx-auto space-y-6">
+              <Card>
+                <CardHeader><CardTitle className="text-base">Add New Member</CardTitle></CardHeader>
+                <CardContent>
+                  <form onSubmit={handleCreateUser} className="grid grid-cols-2 lg:grid-cols-5 gap-4 items-end">
+                    <div className="space-y-1"><label className="text-sm">Name</label><Input name="name" required /></div>
+                    <div className="space-y-1"><label className="text-sm">Email</label><Input name="email" type="email" required /></div>
+                    <div className="space-y-1"><label className="text-sm">Password</label><Input name="password" required /></div>
+                    <div className="space-y-1">
+                      <label className="text-sm">Geo-Fence</label>
+                      <select name="assignedGeoFenceId" className="w-full border rounded-md h-10 px-3 text-sm">
+                        <option value="">None (Remote Allowed)</option>
+                        {geofences.map(gf => (
+                          <option key={gf._id} value={gf._id}>{gf.name}</option>
+                        ))}
+                      </select>
+                    </div>
+                    <Button type="submit"><Plus className="w-4 h-4 mr-2" /> Add</Button>
+                  </form>
+                </CardContent>
+              </Card>
+
               {editingUser && (
                 <Card className="mb-6 border-primary/20 bg-primary/5">
                   <CardHeader><CardTitle className="text-primary text-base">Edit Member: {editingUser.name}</CardTitle></CardHeader>
@@ -212,7 +330,35 @@ const EditorDashboard = () => {
           )}
 
           {activeTab === 'attendance' && (
-            <div className="p-8 max-w-6xl mx-auto">
+            <div className="p-8 max-w-6xl mx-auto space-y-6">
+              {editingSession && (
+                <Card className="border-primary/20 bg-primary/5">
+                  <CardHeader><CardTitle className="text-primary text-base">Edit Attendance Record</CardTitle></CardHeader>
+                  <CardContent>
+                    <form onSubmit={handleUpdateAttendance} className="grid grid-cols-1 lg:grid-cols-4 gap-4 items-end">
+                      <div className="space-y-1">
+                        <label className="text-sm">Punch In Time</label>
+                        <Input name="punchInTime" type="datetime-local" defaultValue={new Date(editingSession.punchInTime).toISOString().slice(0, 16)} required />
+                      </div>
+                      <div className="space-y-1">
+                        <label className="text-sm">Punch Out Time</label>
+                        <Input name="punchOutTime" type="datetime-local" defaultValue={editingSession.punchOutTime ? new Date(editingSession.punchOutTime).toISOString().slice(0, 16) : ''} />
+                      </div>
+                      <div className="space-y-1">
+                        <label className="text-sm">Mode</label>
+                        <select name="mode" defaultValue={editingSession.mode} className="w-full border rounded-md h-10 px-3 text-sm">
+                          <option value="Remote">Remote</option>
+                          <option value="Geo-Fenced">Geo-Fenced</option>
+                        </select>
+                      </div>
+                      <div className="flex gap-2">
+                        <Button type="submit" className="flex-1">Save</Button>
+                        <Button type="button" variant="outline" onClick={() => setEditingSession(null)}>Cancel</Button>
+                      </div>
+                    </form>
+                  </CardContent>
+                </Card>
+              )}
               <Card>
                 <CardHeader className="flex flex-row items-center justify-between">
                   <CardTitle>Attendance History</CardTitle>
@@ -220,7 +366,25 @@ const EditorDashboard = () => {
                 </CardHeader>
                 <CardContent>
                    <p className="text-sm text-muted-foreground mb-4">Displaying all team activity. Use the export tool for full historical records.</p>
-                   {/* Table of sessions could go here */}
+                   <div className="overflow-x-auto">
+                    <table className="w-full text-sm text-left">
+                      <thead className="bg-slate-50 border-b">
+                        <tr><th className="p-3">Employee</th><th className="p-3">Mode</th><th className="p-3">Punch In</th><th className="p-3">Punch Out</th><th className="p-3">Status</th><th className="p-3">Action</th></tr>
+                      </thead>
+                      <tbody>
+                        {sessions.map(s => (
+                          <tr key={s._id} className="border-b hover:bg-slate-50">
+                            <td className="p-3 font-medium">{s.userId?.name}</td>
+                            <td className="p-3"><span className={`text-xs px-2 py-1 rounded-full ${s.mode === 'Remote' ? 'bg-blue-100 text-blue-700' : 'bg-green-100 text-green-700'}`}>{s.mode}</span></td>
+                            <td className="p-3 text-muted-foreground">{format(new Date(s.punchInTime), 'MMM d, hh:mm a')}</td>
+                            <td className="p-3 text-muted-foreground">{s.punchOutTime ? format(new Date(s.punchOutTime), 'MMM d, hh:mm a') : '-'}</td>
+                            <td className="p-3 text-xs">{s.status}</td>
+                            <td className="p-3"><Button variant="ghost" size="sm" onClick={() => setEditingSession(s)} className="text-primary">Edit</Button></td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                   </div>
                 </CardContent>
               </Card>
             </div>

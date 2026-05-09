@@ -5,13 +5,16 @@ export const useSocketStore = create((set, get) => ({
   socket: null,
   liveLocations: {}, // { userId: { location, timestamp } }
   attendanceUpdates: [],
+  breachAlerts: [],
 
   connect: (organizationId) => {
+    const orgIdStr = typeof organizationId === 'object' && organizationId !== null ? organizationId._id : organizationId;
+    
     if (!get().socket) {
       const newSocket = io('http://localhost:5000');
       
       newSocket.on('connect', () => {
-        newSocket.emit('join-org', organizationId);
+        newSocket.emit('join-org', orgIdStr);
       });
 
       newSocket.on('live-location-update', (data) => {
@@ -36,6 +39,19 @@ export const useSocketStore = create((set, get) => ({
         }
       });
 
+      newSocket.on('geo-fence-breach', (data) => {
+        set((state) => ({
+          breachAlerts: [data, ...state.breachAlerts].slice(0, 10)
+        }));
+        // Show browser notification if supported
+        if (Notification.permission === 'granted') {
+          new Notification(`Geo-Fence Breach Alert`, {
+            body: `${data.userName} has exited their assigned geo-fence zone.`,
+            icon: '/favicon.ico'
+          });
+        }
+      });
+
       set({ socket: newSocket });
     }
   },
@@ -44,14 +60,17 @@ export const useSocketStore = create((set, get) => ({
     const { socket } = get();
     if (socket) {
       socket.disconnect();
-      set({ socket: null, liveLocations: {} });
+      set({ socket: null, liveLocations: {}, breachAlerts: [] });
     }
   },
 
   sendLocation: (organizationId, userId, location) => {
+    const orgIdStr = typeof organizationId === 'object' && organizationId !== null ? organizationId._id : organizationId;
+    const userIdStr = typeof userId === 'object' && userId !== null ? userId._id : userId;
+    
     const { socket } = get();
     if (socket) {
-      socket.emit('send-location', { organizationId, userId, location });
+      socket.emit('send-location', { organizationId: orgIdStr, userId: userIdStr, location });
     }
   }
 }));
